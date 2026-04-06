@@ -352,6 +352,7 @@ echo -n "claude settings.json: " && test -f ~/.claude/settings.json && echo "OK"
 6. **tmux split pane NFS workaround unnecessary** - Simplified to standard `#{pane_current_path}`
 7. **oh-my-zsh 安装在错误的 HOME 目录** - Dockerfile 以 root 安装 oh-my-zsh 到 `/root/.oh-my-zsh/`，但实际运行用户是 `tiger`（`$HOME=/home/tiger`）。Phase 2 的插件 clone 到了 `~/.oh-my-zsh/custom/plugins/`（即 `/home/tiger/.oh-my-zsh/custom/plugins/`），但 oh-my-zsh 主体不在该目录下，导致 `source $ZSH/oh-my-zsh.sh` 失败，tmux 新窗口 zsh 无主题无补全。修复：`rsync -a --ignore-existing /root/.oh-my-zsh/ /home/tiger/.oh-my-zsh/` + `chown -R tiger:tiger`
 8. **tmux window 名不随运行命令更新** - `tmux rename-window` 被显式调用时，tmux 会自动将该窗口的 `automatic-rename` 设为 off，导致后续无法自动更新窗口名。根本原因是 `.zshrc` 的 `chpwd` hook 只在切换目录时重命名，没有 `preexec` hook。修复：添加 `_tmux_preexec_rename`（命令开始时显示命令名）和 `precmd` → `_tmux_auto_rename`（命令结束后恢复 `目录:branch`）
+9. **Claude Code + Ghostty + tmux 通知点击无法跳回终端** — 三层问题叠加：(a) Claude Code 子进程没有 TTY，BEL 字符无法到达 Ghostty；(b) tmux `visual-bell on` 拦截 BEL，转为视觉闪烁而非传递给 Ghostty；(c) macOS Sequoia 限制了 terminal-notifier 的 `-activate`/`-execute` 回调（Ghostty Discussion #10445）。修复：使用 OSC 9 escape sequence 通过 tmux DCS passthrough（`\ePtmux;\e\e]9;message\a\e\\`）直达 Ghostty，Ghostty 原生处理为桌面通知，点击自动激活 Ghostty 窗口。需要 tmux 设置 `allow-passthrough on` + `visual-bell off`，Ghostty 设置 `desktop-notifications = true`。脚本：`scripts/claude-notify.sh`
 
 ## Pre-installed by megatron_b200 Dockerfile (skipped)
 

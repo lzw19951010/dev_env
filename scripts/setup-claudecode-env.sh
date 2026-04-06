@@ -104,6 +104,8 @@ patch_tmux() {
 # --- Claude Code Integration ---
 # Notifications: allow OSC passthrough so Claude Code notifications reach Ghostty
 set -g allow-passthrough on
+# Disable visual-bell so BEL passes through to Ghostty (not intercepted by tmux)
+set -g visual-bell off
 # Terminal title: allow Claude Code to set window title
 set -g set-titles on
 set -g set-titles-string '#S:#I #W — #{pane_current_path}'
@@ -296,7 +298,99 @@ PYEOF
 }
 
 # =====================================================================
-# 4. CLEANUP
+# 4. GHOSTTY NOTIFICATION SCRIPT
+# =====================================================================
+install_notify_script() {
+    echo ""
+    echo "=== Installing Ghostty notification script ==="
+
+    local src_dir
+    src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local src="$src_dir/claude-notify.sh"
+    local dest="$HOME/.claude/claude-notify.sh"
+
+    if [ ! -f "$src" ]; then
+        fail "claude-notify.sh not found in $src_dir"
+        return 1
+    fi
+
+    mkdir -p "$HOME/.claude"
+    cp "$src" "$dest"
+    chmod +x "$dest"
+    info "notification: installed claude-notify.sh to ~/.claude/"
+
+    # Configure Ghostty if config exists
+    local ghostty_config="$HOME/.config/ghostty/config"
+    if [ -f "$ghostty_config" ]; then
+        local needs_update=false
+        if ! grep -qF 'desktop-notifications' "$ghostty_config"; then
+            echo 'desktop-notifications = true' >> "$ghostty_config"
+            needs_update=true
+        fi
+        if ! grep -qF 'bell-features' "$ghostty_config"; then
+            echo 'bell-features = system,attention,title' >> "$ghostty_config"
+            needs_update=true
+        fi
+        if $needs_update; then
+            info "notification: updated Ghostty config"
+        else
+            info "notification: Ghostty config already has notification settings"
+        fi
+    else
+        warn "notification: Ghostty config not found at $ghostty_config, skip Ghostty config"
+    fi
+
+    # Configure OMC notification integration if .omc-config.json exists
+    local omc_config="$HOME/.claude/.omc-config.json"
+    if [ -f "$omc_config" ] && command -v python3 &>/dev/null; then
+        python3 << PYEOF
+import json, os
+
+path = os.path.expanduser("~/.claude/.omc-config.json")
+with open(path) as f:
+    data = json.load(f)
+
+notify_path = os.path.expanduser("~/.claude/claude-notify.sh")
+integration = {
+    "id": "macos-notify",
+    "type": "cli",
+    "preset": None,
+    "enabled": True,
+    "config": {
+        "command": notify_path,
+        "args": ["{{projectDisplay}}: {{reason}}"],
+        "timeout": 5000
+    },
+    "events": ["session-end", "ask-user-question"]
+}
+
+ci = data.setdefault("customIntegrations", {"enabled": True, "integrations": []})
+ci["enabled"] = True
+integrations = ci.setdefault("integrations", [])
+
+# Replace existing macos-notify or append
+replaced = False
+for i, item in enumerate(integrations):
+    if item.get("id") == "macos-notify":
+        integrations[i] = integration
+        replaced = True
+        break
+if not replaced:
+    integrations.append(integration)
+
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+
+print("  [OK] notification: OMC config updated to use claude-notify.sh")
+PYEOF
+    else
+        info "notification: OMC config not found, skip OMC integration"
+    fi
+}
+
+# =====================================================================
+# 5. CLEANUP (renumbered from 4)
 # =====================================================================
 cleanup() {
     echo ""
@@ -313,7 +407,7 @@ cleanup() {
 }
 
 # =====================================================================
-# 5. VERIFY
+# 6. VERIFY
 # =====================================================================
 verify() {
     echo ""
@@ -391,6 +485,25 @@ verify() {
         info "keybindings.json: absent (correct)"
     fi
 
+    # Notification script
+    if [ -x "$HOME/.claude/claude-notify.sh" ]; then
+        info "notification: claude-notify.sh installed and executable"
+    else
+        fail "notification: claude-notify.sh not found or not executable"
+        ((errors++))
+    fi
+
+    if tmux list-sessions &>/dev/null; then
+        local vbell
+        vbell=$(tmux show-options -gv visual-bell 2>/dev/null)
+        if [ "$vbell" = "off" ]; then
+            info "tmux visual-bell: off (BEL passes through to Ghostty)"
+        else
+            fail "tmux visual-bell: $vbell (expected: off — blocks notifications)"
+            ((errors++))
+        fi
+    fi
+
     # zshrc markers
     if grep -qF "$MARKER_BEGIN_ZSH_VI" "$HOME/.zshrc"; then
         info "zsh vi-mode block: present"
@@ -438,6 +551,7 @@ main() {
     patch_tmux
     patch_zshrc
     patch_claude_settings
+    install_notify_script
     cleanup
     verify
 }
