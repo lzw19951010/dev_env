@@ -15,5 +15,31 @@
     },
     "env": {
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": 1
+    },
+    "statusLine": {
+        "type": "command",
+        "command": "node $HOME/.claude/hud/omc-hud.mjs"
+    },
+    "enabledPlugins": {
+        "superpowers@claude-plugins-official": true,
+        "swift-lsp@claude-plugins-official": true,
+        "oh-my-claudecode@omc": true
+    },
+    "extraKnownMarketplaces": {
+        "omc": {
+            "source": {
+                "source": "git",
+                "url": "https://github.com/Yeachan-Heo/oh-my-claudecode.git"
+            }
+        }
+    },
+    "effortLevel": "high",
+    "notifications": {
+        "enabled": true,
+        "terminalBell": true
+    },
+    "editorMode": "vim",
+    "omcHud": {
+        "usageApiPollIntervalMs": 1000
     }
 }

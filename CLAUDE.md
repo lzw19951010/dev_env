@@ -51,6 +51,7 @@
 | zsh-completions | ✅ | installed | **this plan** |
 | tmux plugin manager (tpm) | ✅ | installed | **this plan** |
 | xterm-ghostty terminfo | ✅ | ~/.terminfo/x/xterm-ghostty | **this plan** |
+| oh-my-claudecode (OMC) | ✅ | plugin (git marketplace) | **this plan** |
 | claude_settings.json | ✅ | ~/.claude/settings.json | pre-existing |
 
 ---
@@ -366,7 +367,7 @@ Then inside tmux press `prefix + I` (capital I) to install plugins.
 
 ### Phase 5: Claude Code Settings
 
-Ensure `~/.claude/settings.json` exists with full permissions pre-authorized:
+Ensure `~/.claude/settings.json` exists with full permissions and plugin config:
 
 ```bash
 mkdir -p ~/.claude
@@ -388,12 +389,73 @@ cat > ~/.claude/settings.json << 'EOF'
     },
     "env": {
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": 1
+    },
+    "statusLine": {
+        "type": "command",
+        "command": "node $HOME/.claude/hud/omc-hud.mjs"
+    },
+    "enabledPlugins": {
+        "superpowers@claude-plugins-official": true,
+        "swift-lsp@claude-plugins-official": true,
+        "oh-my-claudecode@omc": true
+    },
+    "extraKnownMarketplaces": {
+        "omc": {
+            "source": {
+                "source": "git",
+                "url": "https://github.com/Yeachan-Heo/oh-my-claudecode.git"
+            }
+        }
+    },
+    "effortLevel": "high",
+    "notifications": {
+        "enabled": true,
+        "terminalBell": true
+    },
+    "editorMode": "vim",
+    "omcHud": {
+        "usageApiPollIntervalMs": 1000
     }
 }
 EOF
 ```
 
 This file is loaded at Claude Code startup and grants all tool permissions automatically.
+
+**Key settings explained:**
+- `enabledPlugins` — 启用 oh-my-claudecode 插件（多 agent 编排）和 superpowers 插件
+- `extraKnownMarketplaces` — 注册 OMC 的 git marketplace 源
+- `statusLine` — 使用 OMC HUD 脚本显示状态栏（token 用量、成本等）
+- `omcHud.usageApiPollIntervalMs: 1000` — HUD 每 1 秒刷新一次（默认 5s）
+- `effortLevel: "high"` — 始终使用高 effort（extended thinking）
+- `editorMode: "vim"` — 编辑器 vi 模式
+
+### Phase 7: Install oh-my-claudecode (OMC) Plugin
+
+oh-my-claudecode 是 Claude Code 的多 agent 编排插件，提供专业化 agent（architect、executor、reviewer 等）、自动化工作流（autopilot、ultrawork、ralph）和 HUD 状态显示。
+
+**安装方式：** OMC 通过 Claude Code 的 plugin marketplace 机制安装，配置已在 Phase 5 的 `settings.json` 中声明。首次启动 Claude Code 时会自动从 git 仓库拉取插件。
+
+```bash
+# 验证插件已加载（在 Claude Code 会话中）
+# 方式 1：检查 settings.json 中 OMC 配置
+jq '.enabledPlugins["oh-my-claudecode@omc"]' ~/.claude/settings.json
+# 应返回 true
+
+# 方式 2：检查 marketplace 源
+jq '.extraKnownMarketplaces.omc' ~/.claude/settings.json
+# 应返回 omc git 仓库 URL
+
+# 方式 3：在 Claude Code 中运行
+# /oh-my-claudecode:omc-setup  — 初始化/诊断 OMC 安装
+# /oh-my-claudecode:omc-doctor — 诊断并修复安装问题
+```
+
+**OMC 核心功能：**
+- **专业 Agent**：`architect`（架构分析）、`executor`（代码执行）、`code-reviewer`（代码审查）、`debugger`（调试）、`designer`（UI/UX）等
+- **编排工作流**：`autopilot`（全自动）、`ultrawork`（并行执行）、`ralph`（循环直到完成）、`team`（多 agent 协作）
+- **HUD 状态栏**：实时显示 token 用量、成本、会话时长（刷新频率 1s）
+- **Skills 系统**：可扩展的技能库，支持自定义 skill 创建
 
 ### Phase 6: Fix Ghostty Terminal terminfo
 
