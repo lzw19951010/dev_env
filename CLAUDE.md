@@ -14,6 +14,12 @@
 - Be concise, execute directly, don't over-explain
 - When given a plan, execute it without asking for confirmation
 
+## Model Settings
+
+- **Effort level**: always use `high` (extended thinking enabled)
+- **Output mode**: always use max output tokens — do not truncate or abbreviate responses
+- These are enforced via `~/.claude/settings.json`: `effortLevel: "high"`, `alwaysThinkingEnabled: true`
+
 ---
 
 # Personal Dev Environment Setup Plan
@@ -44,6 +50,7 @@
 | zsh-syntax-highlighting | ✅ | installed | **this plan** |
 | zsh-completions | ✅ | installed | **this plan** |
 | tmux plugin manager (tpm) | ✅ | installed | **this plan** |
+| xterm-ghostty terminfo | ✅ | ~/.terminfo/x/xterm-ghostty | **this plan** |
 | claude_settings.json | ✅ | ~/.claude/settings.json | pre-existing |
 
 ---
@@ -113,7 +120,11 @@ The .zshrc preserves platform-specific workspace configs (sourced via `emulate b
 ```zsh
 # --- Platform/Workspace Config (preserve existing, bash-compat) ---
 emulate bash -c 'source /workspace/mlx/../vscode/prep_env.sh' 2>/dev/null
-sh -c /opt/tiger/mlx_deploy/greeting.sh
+# greeting.sh 只在首次交互式 shell 显示（非 tmux 子窗口）
+if [[ -z "$TMUX" || -z "$_GREETING_SHOWN" ]]; then
+    sh -c /opt/tiger/mlx_deploy/greeting.sh
+    export _GREETING_SHOWN=1
+fi
 if [ -f "/opt/tiger/mlx_deploy/pythonpath_rc" ]; then
     emulate bash -c 'source /opt/tiger/mlx_deploy/pythonpath_rc' 2>/dev/null
 fi
@@ -125,6 +136,13 @@ emulate bash -c 'source /opt/tiger/mlx_deploy/userrc' 2>/dev/null
 # --- Oh My Zsh ---
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME="robbyrussell"
+
+# 禁用 git dirty check（git status 在分布式 FS 上非常慢）
+DISABLE_UNTRACKED_FILES_DIRTY="true"
+
+# 跳过每次启动的 compinit 安全检查（每天只检查一次）
+ZSH_DISABLE_COMPFIX="true"
+export ZSH_COMPDUMP="$HOME/.zcompdump-${SHORT_HOST}-${ZSH_VERSION}"
 
 # --- Plugins ---
 plugins=(
@@ -139,10 +157,53 @@ plugins=(
 
 source $ZSH/oh-my-zsh.sh
 
-# --- fzf config ---
-export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
+# 编译 zcompdump 加速后续加载
+if [[ -f "$ZSH_COMPDUMP" && ( ! -f "${ZSH_COMPDUMP}.zwc" || "$ZSH_COMPDUMP" -nt "${ZSH_COMPDUMP}.zwc" ) ]]; then
+    zcompile "$ZSH_COMPDUMP" &!
+fi
+
+# --- 检测是否在慢速文件系统上 ---
+function _is_slow_fs() {
+    [[ "$PWD" == /mnt/* ]] || [[ "$PWD" == /nfs/* ]]
+}
+
+# --- 覆盖 git_prompt_info：慢速 FS 上用缓存 + 跳过 dirty check ---
+typeset -g _git_prompt_cache=""
+typeset -g _git_prompt_cache_dir=""
+
+function git_prompt_info() {
+    # 同目录下使用缓存，避免每次 prompt 都调 git
+    if [[ "$PWD" == "$_git_prompt_cache_dir" ]]; then
+        echo -n "$_git_prompt_cache"
+        return
+    fi
+    _git_prompt_cache_dir="$PWD"
+
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        _git_prompt_cache=""
+        return
+    fi
+    local ref
+    ref=$(git symbolic-ref --short HEAD 2>/dev/null) || \
+    ref=$(git rev-parse --short HEAD 2>/dev/null) || { _git_prompt_cache=""; return; }
+
+    if _is_slow_fs; then
+        # 慢速 FS：只显示分支名，跳过 git status (dirty check)
+        _git_prompt_cache="${ZSH_THEME_GIT_PROMPT_PREFIX}${ref}${ZSH_THEME_GIT_PROMPT_CLEAN}${ZSH_THEME_GIT_PROMPT_SUFFIX}"
+    else
+        _git_prompt_cache="${ZSH_THEME_GIT_PROMPT_PREFIX}${ref}$(parse_git_dirty)${ZSH_THEME_GIT_PROMPT_SUFFIX}"
+    fi
+    echo -n "$_git_prompt_cache"
+}
+
+# cd 时清除缓存
+function _clear_git_prompt_cache() { _git_prompt_cache_dir=""; }
+add-zsh-hook chpwd _clear_git_prompt_cache
+
+# --- fzf config (去掉 --follow，分布式 FS 上跟踪符号链接很慢) ---
+export FZF_DEFAULT_COMMAND='fd --type f --hidden --exclude .git'
 export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-export FZF_ALT_C_COMMAND='fd --type d --hidden --follow --exclude .git'
+export FZF_ALT_C_COMMAND='fd --type d --hidden --exclude .git'
 export FZF_DEFAULT_OPTS='--height 40% --layout=reverse --border --info=inline'
 
 # --- zoxide (smarter cd) ---
@@ -162,19 +223,33 @@ alias gst='git status'
 alias gd='git diff'
 alias glog='git log --oneline --graph --all'
 
+# --- Quick navigation ---
+alias pg='cd /mlx_devbox/users/liuziwei.leopold/playground'
+
 # --- Editor ---
 export EDITOR='nvim'
 export VISUAL='nvim'
 
-# --- tmux window auto-rename ---
+# --- tmux window auto-rename (带缓存，避免频繁 git 调用) ---
 # 普通 shell 窗口：自动命名为 "目录:git分支"
 # dmux Agent 窗口（$DMUX_PANE_ID 存在）：跳过，由 dmux hook 管理
+typeset -g _tmux_git_branch=""
+typeset -g _tmux_git_dir=""
+
+function _tmux_update_branch() {
+    # 只在切目录时更新 git branch 缓存
+    if [[ "$PWD" != "$_tmux_git_dir" ]]; then
+        _tmux_git_dir="$PWD"
+        _tmux_git_branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+    fi
+}
+
 function _tmux_auto_rename() {
     [ -z "$TMUX" ] && return
     [ -n "$DMUX_PANE_ID" ] && return
+    _tmux_update_branch
     local dir=$(basename "$PWD")
-    local branch=$(git branch --show-current 2>/dev/null)
-    local name="${dir}${branch:+:$branch}"
+    local name="${dir}${_tmux_git_branch:+:$_tmux_git_branch}"
     tmux rename-window "$name"
 }
 # preexec: 命令开始时显示命令名（如 "claude"、"vim"、"python"）
@@ -195,6 +270,10 @@ _tmux_auto_rename
 - Removed `command-not-found` plugin (requires extra package on Debian)
 - Platform scripts wrapped with `emulate bash` for zsh compatibility
 - tmux window auto-rename: `preexec` hook 在命令运行时显示命令名，`precmd` hook 在命令结束后恢复 `目录:branch` 格式
+- **分布式 FS 性能优化**：`git_prompt_info` 和 tmux rename hook 均带目录级缓存，`/mnt/*` 路径跳过 `git status` dirty check
+- fzf 去掉 `--follow`，避免在网络 FS 上跟踪符号链接导致卡顿
+- greeting.sh 在 tmux 子窗口中跳过（通过 `_GREETING_SHOWN` 环境变量）
+- zcompdump 后台编译（`zcompile`），`ZSH_DISABLE_COMPFIX=true` 跳过安全检查
 
 ### Phase 4: Install Tmux Plugin Manager & Update ~/.tmux.conf
 
@@ -316,6 +395,23 @@ EOF
 
 This file is loaded at Claude Code startup and grants all tool permissions automatically.
 
+### Phase 6: Fix Ghostty Terminal terminfo
+
+Ghostty 终端设置 `TERM=xterm-ghostty`，但 Debian 12 系统没有对应的 terminfo 条目，导致依赖 terminfo 的程序（`less`、`clear`、`tmux` 等）报错 `missing or unsuitable terminal: xterm-ghostty`。
+
+```bash
+# 创建基于 xterm-256color 的 xterm-ghostty terminfo 别名
+cat > /tmp/ghostty.terminfo << 'EOF'
+xterm-ghostty|ghostty terminal emulator,
+    use=xterm-256color,
+EOF
+tic -x /tmp/ghostty.terminfo
+# 验证
+infocmp xterm-ghostty > /dev/null 2>&1 && echo "OK" || echo "FAILED"
+```
+
+安装位置：`~/.terminfo/x/xterm-ghostty`（用户级，无需 sudo）
+
 ---
 
 ## Post-Setup Verification
@@ -336,6 +432,9 @@ done
 # Verify tpm
 echo -n "tpm: " && test -d ~/.tmux/plugins/tpm && echo "OK" || echo "MISSING"
 
+# Verify terminfo
+echo -n "xterm-ghostty terminfo: " && infocmp xterm-ghostty > /dev/null 2>&1 && echo "OK" || echo "MISSING"
+
 # Verify claude settings
 echo -n "claude settings.json: " && test -f ~/.claude/settings.json && echo "OK" || echo "MISSING"
 ```
@@ -353,6 +452,8 @@ echo -n "claude settings.json: " && test -f ~/.claude/settings.json && echo "OK"
 7. **oh-my-zsh 安装在错误的 HOME 目录** - Dockerfile 以 root 安装 oh-my-zsh 到 `/root/.oh-my-zsh/`，但实际运行用户是 `tiger`（`$HOME=/home/tiger`）。Phase 2 的插件 clone 到了 `~/.oh-my-zsh/custom/plugins/`（即 `/home/tiger/.oh-my-zsh/custom/plugins/`），但 oh-my-zsh 主体不在该目录下，导致 `source $ZSH/oh-my-zsh.sh` 失败，tmux 新窗口 zsh 无主题无补全。修复：`rsync -a --ignore-existing /root/.oh-my-zsh/ /home/tiger/.oh-my-zsh/` + `chown -R tiger:tiger`
 8. **tmux window 名不随运行命令更新** - `tmux rename-window` 被显式调用时，tmux 会自动将该窗口的 `automatic-rename` 设为 off，导致后续无法自动更新窗口名。根本原因是 `.zshrc` 的 `chpwd` hook 只在切换目录时重命名，没有 `preexec` hook。修复：添加 `_tmux_preexec_rename`（命令开始时显示命令名）和 `precmd` → `_tmux_auto_rename`（命令结束后恢复 `目录:branch`）
 9. **Claude Code + Ghostty + tmux 通知点击无法跳回终端** — 三层问题叠加：(a) Claude Code 子进程没有 TTY，BEL 字符无法到达 Ghostty；(b) tmux `visual-bell on` 拦截 BEL，转为视觉闪烁而非传递给 Ghostty；(c) macOS Sequoia 限制了 terminal-notifier 的 `-activate`/`-execute` 回调（Ghostty Discussion #10445）。修复：使用 OSC 9 escape sequence 通过 tmux DCS passthrough（`\ePtmux;\e\e]9;message\a\e\\`）直达 Ghostty，Ghostty 原生处理为桌面通知，点击自动激活 Ghostty 窗口。需要 tmux 设置 `allow-passthrough on` + `visual-bell off`，Ghostty 设置 `desktop-notifications = true`。脚本：`scripts/claude-notify.sh`
+10. **Ghostty 终端 terminfo 缺失** - 使用 Ghostty 终端 SSH 连入时 `TERM=xterm-ghostty`，但系统无对应 terminfo 条目，导致 `missing or unsuitable terminal: xterm-ghostty` 错误（影响 `less`、`clear`、`tmux` 等依赖 terminfo 的程序）。修复：创建基于 `xterm-256color` 的 `xterm-ghostty` terminfo 别名并用 `tic` 编译安装到 `~/.terminfo/`
+11. **分布式 FS (virtio_pfs) 上 tmux/zsh 极慢** - `/mnt/bn/lzw-ruby` 是 virtio_pfs 分布式文件系统，git 操作延迟高。每次 prompt 触发 `git_prompt_info()`（内含 `git status`）和 `_tmux_auto_rename`（内含 `git branch --show-current`），累积延迟导致交互卡顿。修复：(1) 覆盖 `git_prompt_info` 加目录级缓存，`/mnt/*` 路径跳过 `parse_git_dirty`；(2) tmux rename hook 缓存 git branch 结果，只在 cd 时刷新；(3) `DISABLE_UNTRACKED_FILES_DIRTY=true` 全局禁用 untracked 检查；(4) fzf 去掉 `--follow`；(5) greeting.sh 在 tmux 子窗口跳过；(6) zcompdump 编译加速 + `ZSH_DISABLE_COMPFIX=true`
 
 ## Pre-installed by megatron_b200 Dockerfile (skipped)
 
