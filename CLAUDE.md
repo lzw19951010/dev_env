@@ -55,6 +55,7 @@
 | oh-my-claudecode (OMC) | ✅ | plugin (git marketplace) | **this plan** |
 | OMC HUD wrapper | ✅ | ~/.claude/hud/omc-hud.mjs | **this plan** |
 | claude_settings.json | ✅ | ~/.claude/settings.json | pre-existing |
+| account switcher (skill) | ✅ | skills/switch-account + scripts/switch-account.sh | **this plan** |
 
 ---
 
@@ -503,6 +504,42 @@ infocmp xterm-ghostty > /dev/null 2>&1 && echo "OK" || echo "FAILED"
 
 安装位置：`~/.terminfo/x/xterm-ghostty`（用户级，无需 sudo）
 
+### Phase 8: Claude Code Account Switcher & Skill 安装
+
+多账号切换工具，支持 macOS（Keychain）和 Linux（文件）双平台。已封装为 OMC skill，可通过 `/switch-account` 在 Claude Code 中原生调用。
+
+**项目结构：**
+```
+scripts/switch-account.sh          # 核心脚本
+skills/
+├── install.sh                     # skill 安装脚本（symlink 方式）
+└── switch-account/SKILL.md        # OMC skill 定义
+```
+
+**安装（必须执行）：**
+```bash
+# 将项目中的 skills 通过 symlink 安装到用户级 OMC skill 目录
+./skills/install.sh
+# → ~/.claude/skills/omc-learned/switch-account -> <project>/skills/switch-account/
+```
+
+安装后即可在 Claude Code 中使用：
+- `/switch-account save Work` — 保存当前账号
+- `/switch-account use Personal` — 切换账号
+- `/switch-account list` — 列出所有 profile
+- `/switch-account current` — 查看当前账号
+- 或直接说"切换账号"、"switch account" 等关键词自动触发
+
+**平台适配：**
+| 平台 | 活跃凭证存储 | 读写方式 |
+|------|-------------|---------|
+| macOS | Keychain (`Claude Code-credentials`) | `security` 命令 |
+| Linux | `~/.claude/.credentials.json` | 文件读写 |
+
+Profile 统一存储在 `~/.claude/profiles/<name>.json`，跨平台通用。
+
+**注意：** 切换后需重启 Claude Code 会话。HUD `organizationTag` 和 usage 缓存会自动更新。
+
 ---
 
 ## Post-Setup Verification
@@ -533,6 +570,10 @@ echo -n "claude settings.json: " && test -f ~/.claude/settings.json && echo "OK"
 echo -n "node in PATH: " && command -v node >/dev/null 2>&1 && echo "OK - $(node --version)" || echo "MISSING - run Phase 1 node symlink step"
 echo -n "OMC HUD script: " && test -f ~/.claude/hud/omc-hud.mjs && echo "OK" || echo "MISSING - run: /oh-my-claudecode:hud setup"
 echo -n "OMC HUD renders: " && node ~/.claude/hud/omc-hud.mjs 2>&1 | grep -q "\[OMC\]" && echo "OK" || echo "FAILED - check node ~/.claude/hud/omc-hud.mjs output"
+
+# Verify account switcher skill
+echo -n "account switcher script: " && test -x scripts/switch-account.sh && echo "OK" || echo "MISSING"
+echo -n "account switcher skill: " && test -L ~/.claude/skills/omc-learned/switch-account && echo "OK (symlink)" || echo "MISSING - run: ./skills/install.sh"
 ```
 
 ---
@@ -553,6 +594,7 @@ echo -n "OMC HUD renders: " && node ~/.claude/hud/omc-hud.mjs 2>&1 | grep -q "\[
 12. **node 不在 PATH 中** — 基础镜像中 node 安装在非标准路径下，没有 symlink 到 `/usr/local/bin/`。导致 `settings.json` 的 `statusLine` command 静默失败，HUD 不显示。修复：Phase 1 添加自动检测 + symlink 步骤
 13. **OMC HUD wrapper 脚本未自动创建** — OMC 插件通过 marketplace 安装后，`~/.claude/hud/omc-hud.mjs` 不会自动生成，需要手动执行 `/oh-my-claudecode:hud setup` 或手动创建。原计划 Phase 7 缺失此步骤。修复：Phase 7 增加 HUD 安装步骤
 14. **OMC v4.11.1 dist 编译不完整** — `src/hud/elements/hostname.ts` 存在但 `dist/hud/elements/hostname.js` 缺失，导致 HUD import 失败。上游打包 bug。修复：手动从 TS 源码转译缺失文件
+16. **账号切换脚本跨平台适配** — 原版仅支持 Linux（直接读写 `~/.claude/.credentials.json`），macOS 上 Claude Code 使用 Keychain 存储凭证，直接操作文件无效。修复：抽象出 `read_active_creds`/`write_active_creds`/`has_active_creds` 三个平台适配函数，macOS 通过 `security` 命令读写 Keychain（service: `Claude Code-credentials`），Linux 保持文件方式。Profile 统一存 `~/.claude/profiles/<name>.json`，与平台无关
 15. **zsh 启动在分布式 FS 上 1.1s→0.4s** - 根因：CWD 在 `/mnt/*` 时所有 shell 操作（stat/glob/git 等系统调用）都变慢，bare `zsh -c true` 就从 3ms 涨到 96ms。oh-my-zsh 加载 28 个文件累积放大到 1.1s。修复：(1) `.zshrc` 开头检测 `/mnt/*` 时 `cd /tmp`，加载完毕后 `cd` 回原目录；(2) 预先计算 `SHORT_HOST` 确保 `ZSH_COMPDUMP` 路径一致（之前路径不匹配导致每次都重跑 compinit 925ms）；(3) 用 no-op wrapper 劫持 oh-my-zsh 的 compinit 调用，预先用 `compinit -C` 快速加载；(4) 关闭 oh-my-zsh async git prompt（`zstyle ':omz:alpha:lib:git' async-prompt no`）；(5) `_tmux_auto_rename` 缓存窗口名，同名时跳过 `tmux rename-window` IPC。precmd 延迟从 200ms→20ms
 
 ## Pre-installed by base-image Dockerfile (skipped)

@@ -1,17 +1,53 @@
 #!/bin/bash
-# Claude Code 账号切换工具 (Linux)
-# 凭证存储在 ~/.claude/.credentials.json
+# Claude Code 账号切换工具 (macOS + Linux)
+# Profile 统一存文件: ~/.claude/profiles/<name>.json
+# 活跃凭证: macOS 读写 Keychain, Linux 读写 ~/.claude/.credentials.json
 # 切换时自动更新 HUD 的 organizationTag，让状态栏显示当前账号
 
 set -euo pipefail
 
-CRED_FILE="$HOME/.claude/.credentials.json"
 SETTINGS_FILE="$HOME/.claude/settings.json"
 PROFILE_DIR="$HOME/.claude/profiles"
+CRED_FILE="$HOME/.claude/.credentials.json"
+
+# Keychain 参数 (macOS)
+KC_SERVICE="Claude Code-credentials"
+KC_ACCOUNT="$(whoami)"
 
 mkdir -p "$PROFILE_DIR"
 chmod 700 "$PROFILE_DIR"
 
+# --- 平台检测 ---
+is_macos() { [[ "$(uname)" == "Darwin" ]]; }
+
+# --- 活跃凭证读写 (平台适配) ---
+read_active_creds() {
+    if is_macos; then
+        security find-generic-password -s "$KC_SERVICE" -a "$KC_ACCOUNT" -w 2>/dev/null
+    else
+        [ -f "$CRED_FILE" ] && cat "$CRED_FILE"
+    fi
+}
+
+write_active_creds() {
+    local json="$1"
+    if is_macos; then
+        security add-generic-password -U -s "$KC_SERVICE" -a "$KC_ACCOUNT" -w "$json" 2>/dev/null
+    else
+        echo "$json" > "$CRED_FILE"
+        chmod 600 "$CRED_FILE"
+    fi
+}
+
+has_active_creds() {
+    if is_macos; then
+        security find-generic-password -s "$KC_SERVICE" -a "$KC_ACCOUNT" >/dev/null 2>&1
+    else
+        [ -f "$CRED_FILE" ]
+    fi
+}
+
+# --- 通用函数 ---
 usage() {
     echo "用法:"
     echo "  $(basename "$0") save <名称>     保存当前登录的凭证为一个 profile"
@@ -49,7 +85,6 @@ print(f'{sub}/{tier}')
 " 2>/dev/null || echo "unknown"
 }
 
-# 更新 settings.json 中的 omcHud.organizationTag
 update_hud_org_tag() {
     local name="$1"
     if [ ! -f "$SETTINGS_FILE" ]; then
@@ -73,34 +108,38 @@ with open('$SETTINGS_FILE', 'w') as f:
 " "$name" 2>/dev/null && echo "HUD 已更新: [$name]" || echo "警告: HUD 更新失败"
 }
 
-# 清除 usage-api 缓存（切换账号后旧缓存无效）
 clear_usage_cache() {
     local cache_file="$HOME/.claude/plugins/oh-my-claudecode/.usage-cache.json"
-    if [ -f "$cache_file" ]; then
-        rm -f "$cache_file"
-    fi
+    [ -f "$cache_file" ] && rm -f "$cache_file"
 }
 
 save_profile() {
     local name="$1"
     local file="$PROFILE_DIR/$name.json"
 
-    if [ ! -f "$CRED_FILE" ]; then
-        echo "错误: 没有找到凭证文件 ($CRED_FILE)，请先登录 Claude Code"
+    if ! has_active_creds; then
+        echo "错误: 没有找到活跃凭证，请先登录 Claude Code"
+        is_macos && echo "  (macOS: Keychain 中未找到 '$KC_SERVICE')" \
+                 || echo "  (Linux: 文件 $CRED_FILE 不存在)"
         exit 1
     fi
 
-    cp "$CRED_FILE" "$file"
+    local creds
+    creds=$(read_active_creds)
+    if [ -z "$creds" ]; then
+        echo "错误: 凭证为空"
+        exit 1
+    fi
+
+    echo "$creds" > "$file"
     chmod 600 "$file"
 
-    # 记录当前 profile
     echo "$name" > "$PROFILE_DIR/.current"
 
     local info
     info=$(get_account_info "$file")
     echo "已保存 profile: $name ($info)"
 
-    # 同步 HUD 显示
     update_hud_org_tag "$name"
 }
 
@@ -115,16 +154,13 @@ use_profile() {
         exit 1
     fi
 
-    cp "$file" "$CRED_FILE"
-    chmod 600 "$CRED_FILE"
+    local creds
+    creds=$(cat "$file")
+    write_active_creds "$creds"
 
-    # 记录当前 profile
     echo "$name" > "$PROFILE_DIR/.current"
 
-    # 清除旧的 usage 缓存
     clear_usage_cache
-
-    # 同步 HUD 显示
     update_hud_org_tag "$name"
 
     local info
@@ -171,7 +207,6 @@ delete_profile() {
     rm "$file"
     echo "已删除 profile: $name"
 
-    # 如果删除的是当前 profile，清除 current 标记
     if [ -f "$PROFILE_DIR/.current" ]; then
         local current
         current=$(cat "$PROFILE_DIR/.current")
@@ -190,6 +225,7 @@ show_current() {
             local info
             info=$(get_account_info "$file")
             echo "当前 profile: $name ($info)"
+            is_macos && echo "  平台: macOS (Keychain)" || echo "  平台: Linux (文件)"
             return
         fi
     fi
