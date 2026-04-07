@@ -123,22 +123,34 @@ git clone https://github.com/zsh-users/zsh-completions ~/.oh-my-zsh/custom/plugi
 
 ### Phase 3: Update ~/.zshrc
 
-The .zshrc preserves platform-specific workspace configs (sourced via `emulate bash` for zsh compatibility) and adds oh-my-zsh + tool integrations:
+The .zshrc preserves platform-specific workspace configs (sourced via `emulate bash` for zsh compatibility) and adds oh-my-zsh + tool integrations. **包含分布式 FS 启动加速优化（0.917s→0.190s）。**
 
 ```zsh
+# --- 分布式 FS 加速：在本地 FS 上加载 oh-my-zsh ---
+# 原理：oh-my-zsh 加载触发 11,623 次 openat 系统调用，在分布式 FS 上累积到 1s+。
+# 临时切到 /tmp（本地 tmpfs）让这些 syscall 走本地磁盘，加载完毕后 cd 回。
+typeset -g _ORIG_PWD="$PWD"
+if [[ "$PWD" == /mnt/* || "$PWD" == /nfs/* ]]; then
+    builtin cd /tmp
+fi
+
+# 预计算 SHORT_HOST（避免空值导致 ZSH_COMPDUMP 路径不一致）
+typeset -g SHORT_HOST="${HOST%%.*}"
+
 # --- Platform/Workspace Config (preserve existing, bash-compat) ---
 # NOTE: Paths below are platform-specific. Adjust to your environment.
-# These source bash scripts from the base image's deploy directory.
 emulate bash -c 'source /workspace/mlx/../vscode/prep_env.sh' 2>/dev/null
-# greeting.sh 只在首次交互式 shell 显示（非 tmux 子窗口）
-if [[ -z "$TMUX" || -z "$_GREETING_SHOWN" ]]; then
+# greeting.sh 只在非 tmux 环境显示（tmux pane 全部跳过，节省 0.124s）
+if [[ -z "$TMUX" ]]; then
     sh -c "${PLATFORM_DEPLOY_DIR:-/opt/deploy}/greeting.sh" 2>/dev/null
-    export _GREETING_SHOWN=1
 fi
-for rc_file in pythonpath_rc userrc; do
-    local rc_path="${PLATFORM_DEPLOY_DIR:-/opt/deploy}/${rc_file}"
-    [ -f "$rc_path" ] && emulate bash -c "source $rc_path" 2>/dev/null
-done
+if [ -f "${PLATFORM_DEPLOY_DIR:-/opt/deploy}/pythonpath_rc" ]; then
+    emulate bash -c "source ${PLATFORM_DEPLOY_DIR:-/opt/deploy}/pythonpath_rc" 2>/dev/null
+fi
+if [ -f "${PLATFORM_DEPLOY_DIR:-/opt/deploy}/../rh2_bashrc" ]; then
+    emulate bash -c "source ${PLATFORM_DEPLOY_DIR:-/opt/deploy}/../rh2_bashrc" 2>/dev/null
+fi
+emulate bash -c "source ${PLATFORM_DEPLOY_DIR:-/opt/deploy}/userrc" 2>/dev/null
 
 # --- Oh My Zsh ---
 export ZSH="$HOME/.oh-my-zsh"
@@ -162,12 +174,32 @@ plugins=(
   sudo                       # built-in, press ESC twice to prepend sudo
 )
 
+# 劫持 compinit：oh-my-zsh 调用时自动走 -C 缓存模式（节省 ~0.4s）
+# 保留完整补全功能（1764 个补全函数），只是跳过重新扫描补全目录
+function compinit() {
+    unfunction compinit
+    autoload -Uz compinit
+    compinit -C -d "$ZSH_COMPDUMP"
+}
+
+# 关闭 oh-my-zsh async git prompt（分布式 FS 上反而更慢）
+zstyle ':omz:alpha:lib:git' async-prompt no
+
 source $ZSH/oh-my-zsh.sh
 
 # 编译 zcompdump 加速后续加载
 if [[ -f "$ZSH_COMPDUMP" && ( ! -f "${ZSH_COMPDUMP}.zwc" || "$ZSH_COMPDUMP" -nt "${ZSH_COMPDUMP}.zwc" ) ]]; then
     zcompile "$ZSH_COMPDUMP" &!
 fi
+
+# --- 首次 prompt 延迟 git 操作，加速启动 ---
+# 首次 prompt 跳过所有 git 调用（节省 ~0.17s），用户输入首条命令后恢复
+typeset -g _zsh_first_prompt=1
+function _end_first_prompt() {
+    _zsh_first_prompt=0
+    add-zsh-hook -d preexec _end_first_prompt
+}
+add-zsh-hook preexec _end_first_prompt
 
 # --- 检测是否在慢速文件系统上 ---
 function _is_slow_fs() {
@@ -179,6 +211,8 @@ typeset -g _git_prompt_cache=""
 typeset -g _git_prompt_cache_dir=""
 
 function git_prompt_info() {
+    # 首次 prompt 跳过 git，加速启动
+    (( _zsh_first_prompt )) && return
     # 同目录下使用缓存，避免每次 prompt 都调 git
     if [[ "$PWD" == "$_git_prompt_cache_dir" ]]; then
         echo -n "$_git_prompt_cache"
@@ -244,19 +278,25 @@ typeset -g _tmux_git_branch=""
 typeset -g _tmux_git_dir=""
 
 function _tmux_update_branch() {
-    # 只在切目录时更新 git branch 缓存
     if [[ "$PWD" != "$_tmux_git_dir" ]]; then
         _tmux_git_dir="$PWD"
         _tmux_git_branch=$(git symbolic-ref --short HEAD 2>/dev/null)
     fi
 }
 
+typeset -g _tmux_last_name=""
+
 function _tmux_auto_rename() {
     [ -z "$TMUX" ] && return
     [ -n "$DMUX_PANE_ID" ] && return
+    # 首次 prompt 跳过 git 调用，加速启动
+    (( _zsh_first_prompt )) && return
     _tmux_update_branch
     local dir=$(basename "$PWD")
     local name="${dir}${_tmux_git_branch:+:$_tmux_git_branch}"
+    # 同名时跳过 tmux rename-window IPC（每次 ~20ms）
+    [[ "$name" == "$_tmux_last_name" ]] && return
+    _tmux_last_name="$name"
     tmux rename-window "$name"
 }
 # preexec: 命令开始时显示命令名（如 "claude"、"vim"、"python"）
@@ -269,7 +309,12 @@ function _tmux_preexec_rename() {
 add-zsh-hook chpwd _tmux_auto_rename
 add-zsh-hook preexec _tmux_preexec_rename
 add-zsh-hook precmd _tmux_auto_rename
-_tmux_auto_rename
+
+# --- 恢复原始目录 ---
+if [[ "$PWD" != "$_ORIG_PWD" ]]; then
+    builtin cd "$_ORIG_PWD"
+fi
+unset _ORIG_PWD
 ```
 
 **Notes:**
@@ -277,9 +322,14 @@ _tmux_auto_rename
 - Removed `command-not-found` plugin (requires extra package on Debian)
 - Platform scripts wrapped with `emulate bash` for zsh compatibility
 - tmux window auto-rename: `preexec` hook 在命令运行时显示命令名，`precmd` hook 在命令结束后恢复 `目录:branch` 格式
-- **分布式 FS 性能优化**：`git_prompt_info` 和 tmux rename hook 均带目录级缓存，`/mnt/*` 路径跳过 `git status` dirty check
+- **分布式 FS 启动加速（0.917s→0.190s, 4.8x）**：
+  - `cd /tmp` 加载法：oh-my-zsh 在本地 FS 上加载，避免 11,623 次 openat 走网络
+  - compinit 劫持：oh-my-zsh 调用 compinit 时自动走 `-C` 缓存模式（保留全部 1764 个补全）
+  - 首次 prompt 延迟 git：跳过第一次 prompt 的 git 操作，用户首次命令后恢复
+  - tmux rename 去重：窗口名相同时跳过 IPC
+  - greeting.sh 在 tmux 中全部跳过
+  - `git_prompt_info` 和 tmux rename hook 均带目录级缓存，`/mnt/*` 路径跳过 dirty check
 - fzf 去掉 `--follow`，避免在网络 FS 上跟踪符号链接导致卡顿
-- greeting.sh 在 tmux 子窗口中跳过（通过 `_GREETING_SHOWN` 环境变量）
 - zcompdump 后台编译（`zcompile`），`ZSH_DISABLE_COMPFIX=true` 跳过安全检查
 
 ### Phase 4: Install Tmux Plugin Manager & Update ~/.tmux.conf
@@ -354,7 +404,10 @@ set -g @plugin 'tmux-plugins/tmux-yank'
 set -g @plugin 'tmux-plugins/tmux-resurrect'    # save/restore sessions
 set -g @plugin 'tmux-plugins/tmux-continuum'     # auto-save sessions
 
-set -g @continuum-restore 'on'
+# 不启用 @continuum-restore：开启后 tmux 服务首次启动会自动恢复上次的会话
+# 目录，导致在任意目录执行 tmux 都会跳进之前的工作目录。保留 resurrect 插件
+# 以便用 prefix + Ctrl-s / Ctrl-r 手动存取。
+set -g @continuum-restore 'off'
 set -g @resurrect-capture-pane-contents 'on'
 
 # Initialize tpm (keep at bottom)
@@ -394,6 +447,19 @@ cat > ~/.claude/settings.json << 'EOF'
         ],
         "deny": []
     },
+    "hooks": {
+        "PreToolUse": [
+            {
+                "matcher": "AskUserQuestion",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "bash /mnt/bn/lzw-ruby/leopold/dev_env/scripts/claude-notify.sh 'Claude Code 需要你的输入'"
+                    }
+                ]
+            }
+        ]
+    },
     "env": {
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": 1
     },
@@ -430,6 +496,7 @@ EOF
 This file is loaded at Claude Code startup and grants all tool permissions automatically.
 
 **Key settings explained:**
+- `hooks` — `AskUserQuestion` 调用时通过 `claude-notify.sh` 发送 OSC 9 桌面通知（需要 tmux `allow-passthrough on` + Ghostty `desktop-notifications = true`）
 - `enabledPlugins` — 启用 oh-my-claudecode 插件（多 agent 编排）和 superpowers 插件
 - `extraKnownMarketplaces` — 注册 OMC 的 git marketplace 源
 - `statusLine` — 使用 OMC HUD 脚本显示状态栏（token 用量、成本等）
@@ -520,7 +587,7 @@ skills/
 ```bash
 # 将项目中的 skills 通过 symlink 安装到用户级 OMC skill 目录
 ./skills/install.sh
-# → ~/.claude/skills/omc-learned/switch-account -> <project>/skills/switch-account/
+# → ~/.claude/skills/switch-account -> <project>/skills/switch-account/
 ```
 
 安装后即可在 Claude Code 中使用：
@@ -573,7 +640,15 @@ echo -n "OMC HUD renders: " && node ~/.claude/hud/omc-hud.mjs 2>&1 | grep -q "\[
 
 # Verify account switcher skill
 echo -n "account switcher script: " && test -x scripts/switch-account.sh && echo "OK" || echo "MISSING"
-echo -n "account switcher skill: " && test -L ~/.claude/skills/omc-learned/switch-account && echo "OK (symlink)" || echo "MISSING - run: ./skills/install.sh"
+echo -n "account switcher skill: " && test -L ~/.claude/skills/switch-account && echo "OK (symlink)" || echo "MISSING - run: ./skills/install.sh"
+
+# Verify zsh startup performance (target: < 0.2s in tmux on distributed FS)
+echo -n "zsh startup (tmux, distributed FS): "
+STARTUP_TIME=$(TMUX=/tmp/tmux-fake zsh -i -c 'exit' 2>&1 | grep -oP '[\d.]+(?= total)' | tail -1)
+echo "${STARTUP_TIME}s (target: < 0.2s)"
+
+# Verify hooks config
+echo -n "AskUserQuestion hook: " && jq -e '.hooks.PreToolUse[0].matcher' ~/.claude/settings.json 2>/dev/null | grep -q "AskUserQuestion" && echo "OK" || echo "MISSING"
 ```
 
 ---
@@ -594,8 +669,10 @@ echo -n "account switcher skill: " && test -L ~/.claude/skills/omc-learned/switc
 12. **node 不在 PATH 中** — 基础镜像中 node 安装在非标准路径下，没有 symlink 到 `/usr/local/bin/`。导致 `settings.json` 的 `statusLine` command 静默失败，HUD 不显示。修复：Phase 1 添加自动检测 + symlink 步骤
 13. **OMC HUD wrapper 脚本未自动创建** — OMC 插件通过 marketplace 安装后，`~/.claude/hud/omc-hud.mjs` 不会自动生成，需要手动执行 `/oh-my-claudecode:hud setup` 或手动创建。原计划 Phase 7 缺失此步骤。修复：Phase 7 增加 HUD 安装步骤
 14. **OMC v4.11.1 dist 编译不完整** — `src/hud/elements/hostname.ts` 存在但 `dist/hud/elements/hostname.js` 缺失，导致 HUD import 失败。上游打包 bug。修复：手动从 TS 源码转译缺失文件
-16. **账号切换脚本跨平台适配** — 原版仅支持 Linux（直接读写 `~/.claude/.credentials.json`），macOS 上 Claude Code 使用 Keychain 存储凭证，直接操作文件无效。修复：抽象出 `read_active_creds`/`write_active_creds`/`has_active_creds` 三个平台适配函数，macOS 通过 `security` 命令读写 Keychain（service: `Claude Code-credentials`），Linux 保持文件方式。Profile 统一存 `~/.claude/profiles/<name>.json`，与平台无关
-15. **zsh 启动在分布式 FS 上 1.1s→0.4s** - 根因：CWD 在 `/mnt/*` 时所有 shell 操作（stat/glob/git 等系统调用）都变慢，bare `zsh -c true` 就从 3ms 涨到 96ms。oh-my-zsh 加载 28 个文件累积放大到 1.1s。修复：(1) `.zshrc` 开头检测 `/mnt/*` 时 `cd /tmp`，加载完毕后 `cd` 回原目录；(2) 预先计算 `SHORT_HOST` 确保 `ZSH_COMPDUMP` 路径一致（之前路径不匹配导致每次都重跑 compinit 925ms）；(3) 用 no-op wrapper 劫持 oh-my-zsh 的 compinit 调用，预先用 `compinit -C` 快速加载；(4) 关闭 oh-my-zsh async git prompt（`zstyle ':omz:alpha:lib:git' async-prompt no`）；(5) `_tmux_auto_rename` 缓存窗口名，同名时跳过 `tmux rename-window` IPC。precmd 延迟从 200ms→20ms
+15. **zsh 启动在分布式 FS 上 0.917s→0.190s（4.8x 提升）** - 根因：CWD 在 `/mnt/*` 时 oh-my-zsh 加载触发 11,623 次 `openat` 系统调用，每次都有网络延迟。修复（6 项优化叠加）：(1) `.zshrc` 开头检测 `/mnt/*` 时 `cd /tmp`，加载完毕后 `cd` 回原目录（最大收益，节省 ~0.7s）；(2) 预计算 `SHORT_HOST` 确保 `ZSH_COMPDUMP` 路径一致；(3) compinit 劫持：定义 wrapper function 让 oh-my-zsh 的 compinit 调用自动走 `-C` 缓存模式（节省 ~0.4s，保留全部 1764 个补全函数）—— **注意：不能用 no-op 劫持，会导致 tab 补全完全失效**；(4) 关闭 oh-my-zsh async git prompt（`zstyle ':omz:alpha:lib:git' async-prompt no`）；(5) `_tmux_auto_rename` 缓存窗口名，同名时跳过 `tmux rename-window` IPC；(6) 首次 prompt 延迟 git 操作（`_zsh_first_prompt` 标志），用户输入首条命令后恢复 git prompt 和 tmux rename（节省 ~0.17s）；(7) greeting.sh 在 tmux 环境中全部跳过（节省 0.124s）
+16. **AskUserQuestion 不触发桌面通知** — Claude Code 的 `terminalBell` 通知只在任务完成时触发，`AskUserQuestion` 提问环节不触发。修复：在 `settings.json` 的 `hooks.PreToolUse` 中添加 `AskUserQuestion` matcher，调用 `scripts/claude-notify.sh` 发送 OSC 9 通知。hook 格式为 `matcher` + `hooks` 数组（不是 `matcher` + `command`，否则 settings.json 校验报错）
+17. **账号切换脚本跨平台适配** — 原版仅支持 Linux（直接读写 `~/.claude/.credentials.json`），macOS 上 Claude Code 使用 Keychain 存储凭证，直接操作文件无效。修复：抽象出 `read_active_creds`/`write_active_creds`/`has_active_creds` 三个平台适配函数，macOS 通过 `security` 命令读写 Keychain（service: `Claude Code-credentials`），Linux 保持文件方式。Profile 统一存 `~/.claude/profiles/<name>.json`，与平台无关
+18. **tmux 在任意目录启动都跳进 dev_env** — `~/.tmux.conf` 开了 `@continuum-restore 'on'`，tmux 服务首次启动时 `tmux-continuum` 会自动恢复上次保存的 resurrect 快照，包含每个 pane 的工作目录，导致不管在哪里敲 `tmux` 都会落回上次的工作目录（通常是 dev_env）。修复：改成 `@continuum-restore 'off'`，保留 `tmux-resurrect` 以便手动 `prefix + Ctrl-s / Ctrl-r` 存取会话。旧快照存在 `~/.tmux/resurrect/` 下，如需彻底清理可 `rm -rf ~/.tmux/resurrect`
 
 ## Pre-installed by base-image Dockerfile (skipped)
 

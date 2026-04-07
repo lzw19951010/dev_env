@@ -28,7 +28,7 @@ argument-hint: "<save|use|list|current|delete> [name]"
 
 脚本与本 skill 同仓库，路径解析优先级：
 1. 当前目录: `scripts/switch-account.sh`
-2. Skill 所在仓库: `$(dirname "$(readlink ~/.claude/skills/omc-learned/switch-account)")/../../scripts/switch-account.sh`
+2. Skill 所在仓库: `$(dirname "$(readlink ~/.claude/skills/switch-account)")/../../scripts/switch-account.sh`
 3. 固定路径: `~/github/dev_env/scripts/switch-account.sh`
 
 ## Workflow
