@@ -307,6 +307,7 @@ setw -g pane-base-index 1
 set -g renumber-windows on
 set -sg escape-time 0
 set -g focus-events on
+set -g allow-passthrough on   # Allow OSC 9 notifications to pass through tmux to Ghostty
 set -g allow-rename off      # 禁止应用程序通过 escape sequence 修改 window 名（由 zsh hook 统一管理）
 setw -g automatic-rename on  # 全局默认开启，实际由 zsh preexec/precmd hook 调用 tmux rename-window 控制
 
