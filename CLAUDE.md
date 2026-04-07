@@ -25,7 +25,7 @@
 # Personal Dev Environment Setup Plan
 
 > Generated: 2026-02-10 | Platform: Debian 12 (bookworm) x86_64 (Linux 5.4.250)
-> Base Image: megatron_b200 (Debian 12, CUDA 12.8)
+> Base Image: base-image (Debian 12, CUDA 12.8)
 > Shell: zsh 5.9 + oh-my-zsh | Terminal Multiplexer: tmux 3.3a
 
 ## Current State
@@ -46,12 +46,14 @@
 | zoxide | ✅ | 0.4.3 | **this plan** |
 | lazygit | ✅ | 0.59.0 (GitHub release) | **this plan** |
 | neovim | ✅ | 0.7.2 | **this plan** |
+| node (symlink) | ✅ | v18.15.0 (auto-detected) | **this plan** |
 | zsh-autosuggestions | ✅ | installed | **this plan** |
 | zsh-syntax-highlighting | ✅ | installed | **this plan** |
 | zsh-completions | ✅ | installed | **this plan** |
 | tmux plugin manager (tpm) | ✅ | installed | **this plan** |
 | xterm-ghostty terminfo | ✅ | ~/.terminfo/x/xterm-ghostty | **this plan** |
 | oh-my-claudecode (OMC) | ✅ | plugin (git marketplace) | **this plan** |
+| OMC HUD wrapper | ✅ | ~/.claude/hud/omc-hud.mjs | **this plan** |
 | claude_settings.json | ✅ | ~/.claude/settings.json | pre-existing |
 
 ---
@@ -67,6 +69,10 @@ sudo apt-get update && sudo apt-get install -y fzf fd-find bat zoxide neovim jq
 # Create symlinks for Debian naming (fd-find -> fd, batcat -> bat)
 sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd
 sudo ln -sf /usr/bin/batcat /usr/local/bin/bat
+
+# Node.js symlink (base image may have node outside PATH, auto-detect it)
+NODE_BIN=$(find /opt /usr/local -name "node" -type f -executable 2>/dev/null | head -1)
+[ -n "$NODE_BIN" ] && sudo ln -sf "$NODE_BIN" /usr/local/bin/node && echo "Linked: $NODE_BIN" || echo "WARN: node not found, install manually"
 
 # eza (not in Debian repos, install from GitHub)
 EZA_VERSION=$(curl -s https://api.github.com/repos/eza-community/eza/releases/latest | jq -r .tag_name)
@@ -93,8 +99,8 @@ curl -sL "https://github.com/jesseduffield/lazygit/releases/download/${LG_VERSIO
 
 ### Phase 2: Install Zsh Plugins
 
-> oh-my-zsh is pre-installed in the megatron_b200 Dockerfile, but only under `/root/.oh-my-zsh/`.
-> If the runtime user is NOT root (e.g. `tiger`), must copy oh-my-zsh to `$HOME/.oh-my-zsh/` first.
+> oh-my-zsh is pre-installed in the base-image Dockerfile, but only under `/root/.oh-my-zsh/`.
+> If the runtime user is NOT root, must copy oh-my-zsh to `$HOME/.oh-my-zsh/` first.
 
 ```bash
 # Copy oh-my-zsh to current user's HOME if not already present (Dockerfile installs to /root only)
@@ -120,19 +126,18 @@ The .zshrc preserves platform-specific workspace configs (sourced via `emulate b
 
 ```zsh
 # --- Platform/Workspace Config (preserve existing, bash-compat) ---
+# NOTE: Paths below are platform-specific. Adjust to your environment.
+# These source bash scripts from the base image's deploy directory.
 emulate bash -c 'source /workspace/mlx/../vscode/prep_env.sh' 2>/dev/null
 # greeting.sh 只在首次交互式 shell 显示（非 tmux 子窗口）
 if [[ -z "$TMUX" || -z "$_GREETING_SHOWN" ]]; then
-    sh -c /opt/tiger/mlx_deploy/greeting.sh
+    sh -c "${PLATFORM_DEPLOY_DIR:-/opt/deploy}/greeting.sh" 2>/dev/null
     export _GREETING_SHOWN=1
 fi
-if [ -f "/opt/tiger/mlx_deploy/pythonpath_rc" ]; then
-    emulate bash -c 'source /opt/tiger/mlx_deploy/pythonpath_rc' 2>/dev/null
-fi
-if [ -f "/opt/tiger/rh2_bashrc" ]; then
-    emulate bash -c 'source /opt/tiger/rh2_bashrc' 2>/dev/null
-fi
-emulate bash -c 'source /opt/tiger/mlx_deploy/userrc' 2>/dev/null
+for rc_file in pythonpath_rc userrc; do
+    local rc_path="${PLATFORM_DEPLOY_DIR:-/opt/deploy}/${rc_file}"
+    [ -f "$rc_path" ] && emulate bash -c "source $rc_path" 2>/dev/null
+done
 
 # --- Oh My Zsh ---
 export ZSH="$HOME/.oh-my-zsh"
@@ -225,7 +230,7 @@ alias gd='git diff'
 alias glog='git log --oneline --graph --all'
 
 # --- Quick navigation ---
-alias pg='cd /mlx_devbox/users/liuziwei.leopold/playground'
+alias pg='cd $HOME/playground'  # adjust to your playground path
 
 # --- Editor ---
 export EDITOR='nvim'
@@ -278,7 +283,7 @@ _tmux_auto_rename
 
 ### Phase 4: Install Tmux Plugin Manager & Update ~/.tmux.conf
 
-> tmux is pre-installed in the megatron_b200 Dockerfile, only need tpm + config.
+> tmux is pre-installed in the base-image Dockerfile, only need tpm + config.
 
 ```bash
 git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
@@ -451,6 +456,29 @@ jq '.extraKnownMarketplaces.omc' ~/.claude/settings.json
 # /oh-my-claudecode:omc-doctor — 诊断并修复安装问题
 ```
 
+**HUD 安装（插件安装后必须手动执行）：**
+
+OMC 插件安装不会自动创建 HUD wrapper 脚本，需要手动执行：
+
+```bash
+# 1. 创建 HUD 目录
+mkdir -p ~/.claude/hud
+
+# 2. 创建 HUD wrapper 脚本（在 Claude Code 会话中执行）
+# /oh-my-claudecode:hud setup
+# 或手动写入 ~/.claude/hud/omc-hud.mjs（内容见 skills/hud/SKILL.md）
+
+# 3. 验证 HUD 可运行
+node ~/.claude/hud/omc-hud.mjs
+# 应输出 "[OMC] HUD v4.x.x | preset: focused" 而非 "not found" 错误
+
+# 4. 如果报 "Cannot find module" 错误（dist 编译不完整）：
+# 检查 src/ 和 dist/ 的文件差异，手动转译缺失的 .ts -> .js 文件
+# 已知 v4.11.1 缺失 dist/hud/elements/hostname.js
+```
+
+**注意：** `settings.json` 中的 `statusLine.command` 依赖 `node` 在 PATH 中（Phase 1 已添加 symlink）。如果 node 不在 PATH，HUD 会静默失败，不报错。
+
 **OMC 核心功能：**
 - **专业 Agent**：`architect`（架构分析）、`executor`（代码执行）、`code-reviewer`（代码审查）、`debugger`（调试）、`designer`（UI/UX）等
 - **编排工作流**：`autopilot`（全自动）、`ultrawork`（并行执行）、`ralph`（循环直到完成）、`team`（多 agent 协作）
@@ -499,6 +527,11 @@ echo -n "xterm-ghostty terminfo: " && infocmp xterm-ghostty > /dev/null 2>&1 && 
 
 # Verify claude settings
 echo -n "claude settings.json: " && test -f ~/.claude/settings.json && echo "OK" || echo "MISSING"
+
+# Verify OMC HUD (requires node in PATH)
+echo -n "node in PATH: " && command -v node >/dev/null 2>&1 && echo "OK - $(node --version)" || echo "MISSING - run Phase 1 node symlink step"
+echo -n "OMC HUD script: " && test -f ~/.claude/hud/omc-hud.mjs && echo "OK" || echo "MISSING - run: /oh-my-claudecode:hud setup"
+echo -n "OMC HUD renders: " && node ~/.claude/hud/omc-hud.mjs 2>&1 | grep -q "\[OMC\]" && echo "OK" || echo "FAILED - check node ~/.claude/hud/omc-hud.mjs output"
 ```
 
 ---
@@ -511,14 +544,17 @@ echo -n "claude settings.json: " && test -f ~/.claude/settings.json && echo "OK"
 4. **`z` plugin conflicts with zoxide** - Removed `z` plugin since zoxide provides the same `z` command
 5. **`pbcopy` not available on Linux** - Replaced with `xclip -selection clipboard`
 6. **tmux split pane NFS workaround unnecessary** - Simplified to standard `#{pane_current_path}`
-7. **oh-my-zsh 安装在错误的 HOME 目录** - Dockerfile 以 root 安装 oh-my-zsh 到 `/root/.oh-my-zsh/`，但实际运行用户是 `tiger`（`$HOME=/home/tiger`）。Phase 2 的插件 clone 到了 `~/.oh-my-zsh/custom/plugins/`（即 `/home/tiger/.oh-my-zsh/custom/plugins/`），但 oh-my-zsh 主体不在该目录下，导致 `source $ZSH/oh-my-zsh.sh` 失败，tmux 新窗口 zsh 无主题无补全。修复：`rsync -a --ignore-existing /root/.oh-my-zsh/ /home/tiger/.oh-my-zsh/` + `chown -R tiger:tiger`
+7. **oh-my-zsh 安装在错误的 HOME 目录** - Dockerfile 以 root 安装 oh-my-zsh 到 `/root/.oh-my-zsh/`，但实际运行用户非 root（`$HOME` 不同）。Phase 2 的插件 clone 到了 `~/.oh-my-zsh/custom/plugins/`，但 oh-my-zsh 主体不在该目录下，导致 `source $ZSH/oh-my-zsh.sh` 失败。修复：`rsync -a --ignore-existing /root/.oh-my-zsh/ $HOME/.oh-my-zsh/` + `chown -R $(whoami):$(id -gn) $HOME/.oh-my-zsh`
 8. **tmux window 名不随运行命令更新** - `tmux rename-window` 被显式调用时，tmux 会自动将该窗口的 `automatic-rename` 设为 off，导致后续无法自动更新窗口名。根本原因是 `.zshrc` 的 `chpwd` hook 只在切换目录时重命名，没有 `preexec` hook。修复：添加 `_tmux_preexec_rename`（命令开始时显示命令名）和 `precmd` → `_tmux_auto_rename`（命令结束后恢复 `目录:branch`）
 9. **Claude Code + Ghostty + tmux 通知点击无法跳回终端** — 三层问题叠加：(a) Claude Code 子进程没有 TTY，BEL 字符无法到达 Ghostty；(b) tmux `visual-bell on` 拦截 BEL，转为视觉闪烁而非传递给 Ghostty；(c) macOS Sequoia 限制了 terminal-notifier 的 `-activate`/`-execute` 回调（Ghostty Discussion #10445）。修复：使用 OSC 9 escape sequence 通过 tmux DCS passthrough（`\ePtmux;\e\e]9;message\a\e\\`）直达 Ghostty，Ghostty 原生处理为桌面通知，点击自动激活 Ghostty 窗口。需要 tmux 设置 `allow-passthrough on` + `visual-bell off`，Ghostty 设置 `desktop-notifications = true`。脚本：`scripts/claude-notify.sh`
 10. **Ghostty 终端 terminfo 缺失** - 使用 Ghostty 终端 SSH 连入时 `TERM=xterm-ghostty`，但系统无对应 terminfo 条目，导致 `missing or unsuitable terminal: xterm-ghostty` 错误（影响 `less`、`clear`、`tmux` 等依赖 terminfo 的程序）。修复：创建基于 `xterm-256color` 的 `xterm-ghostty` terminfo 别名并用 `tic` 编译安装到 `~/.terminfo/`
-11. **分布式 FS (virtio_pfs) 上 tmux/zsh 极慢** - `/mnt/bn/lzw-ruby` 是 virtio_pfs 分布式文件系统，git 操作延迟高。每次 prompt 触发 `git_prompt_info()`（内含 `git status`）和 `_tmux_auto_rename`（内含 `git branch --show-current`），累积延迟导致交互卡顿。修复：(1) 覆盖 `git_prompt_info` 加目录级缓存，`/mnt/*` 路径跳过 `parse_git_dirty`；(2) tmux rename hook 缓存 git branch 结果，只在 cd 时刷新；(3) `DISABLE_UNTRACKED_FILES_DIRTY=true` 全局禁用 untracked 检查；(4) fzf 去掉 `--follow`；(5) greeting.sh 在 tmux 子窗口跳过；(6) zcompdump 编译加速 + `ZSH_DISABLE_COMPFIX=true`
-12. **zsh 启动在分布式 FS 上 1.1s→0.4s** - 根因：CWD 在 `/mnt/*` 时所有 shell 操作（stat/glob/git 等系统调用）都变慢，bare `zsh -c true` 就从 3ms 涨到 96ms。oh-my-zsh 加载 28 个文件累积放大到 1.1s。修复：(1) `.zshrc` 开头检测 `/mnt/*` 时 `cd /tmp`，加载完毕后 `cd` 回原目录；(2) 预先计算 `SHORT_HOST` 确保 `ZSH_COMPDUMP` 路径一致（之前路径不匹配导致每次都重跑 compinit 925ms）；(3) 用 no-op wrapper 劫持 oh-my-zsh 的 compinit 调用，预先用 `compinit -C` 快速加载；(4) 关闭 oh-my-zsh async git prompt（`zstyle ':omz:alpha:lib:git' async-prompt no`）；(5) `_tmux_auto_rename` 缓存窗口名，同名时跳过 `tmux rename-window` IPC。precmd 延迟从 200ms→20ms
+11. **分布式 FS 上 tmux/zsh 极慢** - `/mnt/*` 是分布式文件系统，git 操作延迟高。每次 prompt 触发 `git_prompt_info()`（内含 `git status`）和 `_tmux_auto_rename`（内含 `git branch --show-current`），累积延迟导致交互卡顿。修复：(1) 覆盖 `git_prompt_info` 加目录级缓存，`/mnt/*` 路径跳过 `parse_git_dirty`；(2) tmux rename hook 缓存 git branch 结果，只在 cd 时刷新；(3) `DISABLE_UNTRACKED_FILES_DIRTY=true` 全局禁用 untracked 检查；(4) fzf 去掉 `--follow`；(5) greeting.sh 在 tmux 子窗口跳过；(6) zcompdump 编译加速 + `ZSH_DISABLE_COMPFIX=true`
+12. **node 不在 PATH 中** — 基础镜像中 node 安装在非标准路径下，没有 symlink 到 `/usr/local/bin/`。导致 `settings.json` 的 `statusLine` command 静默失败，HUD 不显示。修复：Phase 1 添加自动检测 + symlink 步骤
+13. **OMC HUD wrapper 脚本未自动创建** — OMC 插件通过 marketplace 安装后，`~/.claude/hud/omc-hud.mjs` 不会自动生成，需要手动执行 `/oh-my-claudecode:hud setup` 或手动创建。原计划 Phase 7 缺失此步骤。修复：Phase 7 增加 HUD 安装步骤
+14. **OMC v4.11.1 dist 编译不完整** — `src/hud/elements/hostname.ts` 存在但 `dist/hud/elements/hostname.js` 缺失，导致 HUD import 失败。上游打包 bug。修复：手动从 TS 源码转译缺失文件
+15. **zsh 启动在分布式 FS 上 1.1s→0.4s** - 根因：CWD 在 `/mnt/*` 时所有 shell 操作（stat/glob/git 等系统调用）都变慢，bare `zsh -c true` 就从 3ms 涨到 96ms。oh-my-zsh 加载 28 个文件累积放大到 1.1s。修复：(1) `.zshrc` 开头检测 `/mnt/*` 时 `cd /tmp`，加载完毕后 `cd` 回原目录；(2) 预先计算 `SHORT_HOST` 确保 `ZSH_COMPDUMP` 路径一致（之前路径不匹配导致每次都重跑 compinit 925ms）；(3) 用 no-op wrapper 劫持 oh-my-zsh 的 compinit 调用，预先用 `compinit -C` 快速加载；(4) 关闭 oh-my-zsh async git prompt（`zstyle ':omz:alpha:lib:git' async-prompt no`）；(5) `_tmux_auto_rename` 缓存窗口名，同名时跳过 `tmux rename-window` IPC。precmd 延迟从 200ms→20ms
 
-## Pre-installed by megatron_b200 Dockerfile (skipped)
+## Pre-installed by base-image Dockerfile (skipped)
 
 The following are already in the base Docker image and do **not** need installation:
 - `tmux` / `zsh` / `ninja-build` — installed via `apt-get` in Dockerfile
