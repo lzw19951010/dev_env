@@ -143,6 +143,21 @@ save_profile() {
     update_hud_org_tag "$name"
 }
 
+verify_token() {
+    # 用 claude -p 做一次最小调用，验证 token 是否有效
+    # 超时 10 秒，max-turns 1，用最便宜的模型
+    local output
+    output=$(echo "hi" | timeout 15 claude -p --max-turns 1 --model haiku 2>&1) && return 0
+    # 检查是否是认证错误
+    if echo "$output" | grep -qi "auth\|login\|unauthorized\|expired\|token\|credential"; then
+        return 1
+    fi
+    # 其他错误（网络等）不算 token 失效，给个警告但不阻断
+    echo "警告: 验证时出现非认证错误，token 可能仍然有效"
+    echo "  $output" | head -3
+    return 0
+}
+
 use_profile() {
     local name="$1"
     local file="$PROFILE_DIR/$name.json"
@@ -166,7 +181,32 @@ use_profile() {
     local info
     info=$(get_account_info "$file")
     echo "已切换到: $name ($info)"
-    echo "提示: 需要重启 Claude Code 会话才能使用新凭证"
+
+    # 验证 token 有效性
+    echo "验证 token..."
+    if verify_token; then
+        echo "✓ Token 有效"
+        echo "提示: 需要重启 Claude Code 会话才能使用新凭证"
+    else
+        echo "✗ Token 已过期"
+        echo ""
+        echo "需要重新登录。请运行:"
+        echo "  claude auth login"
+        echo ""
+        echo "登录成功后自动保存新凭证? [Y/n]"
+        read -r answer
+        if [[ -z "$answer" || "$answer" =~ ^[Yy] ]]; then
+            claude auth login
+            if has_active_creds; then
+                save_profile "$name"
+                echo "✓ 新凭证已保存到 profile: $name"
+            else
+                echo "✗ 登录后未找到凭证，请手动 save"
+            fi
+        else
+            echo "跳过。登录后记得运行: $(basename "$0") save $name"
+        fi
+    fi
 }
 
 list_profiles() {

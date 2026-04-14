@@ -1,0 +1,20 @@
+{
+  "description": "Claude Code plugin version lock — consumed by scripts/setup.sh to install plugins on new machines",
+  "lastUpdated": "2026-04-14",
+  "marketplaces": {
+    "omc": "https://github.com/Yeachan-Heo/oh-my-claudecode.git",
+    "zero-claw": "https://github.com/qqhard/zero-claw.git"
+  },
+  "plugins": {
+    "superpowers@claude-plugins-official": "5.0.7",
+    "swift-lsp@claude-plugins-official": "1.0.0",
+    "oh-my-claudecode@omc": "4.11.6",
+    "zero-claw@zero-claw": "0.2.3",
+    "telegram@claude-plugins-official": "0.0.5"
+  },
+  "omc": {
+    "installMethod": "npm",
+    "package": "oh-my-claude-sisyphus",
+    "minVersion": "4.11.6"
+  }
+}
